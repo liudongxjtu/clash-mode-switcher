@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clash 模式切换</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background:#1b1e24; color:#e6e8ee; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
+  .card { background:#262a33; border-radius:16px; padding:32px 40px; text-align:center; box-shadow:0 8px 30px rgba(0,0,0,.4); min-width:320px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .status { font-size:14px; color:#9aa3b2; margin-bottom:24px; }
+  .btn { display:block; width:100%; padding:14px; margin:12px 0; font-size:16px; border-radius:10px; border:2px solid #3a4050; background:#2f3542; color:#e6e8ee; cursor:pointer; transition:all .15s; }
+  .btn:hover { border-color:#6a7690; }
+  .btn.active { background:#2f6fed; border-color:#2f6fed; color:#fff; }
+  .err { color:#ff7b72; font-size:14px; margin-top:12px; min-height:18px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Clash 代理模式</h1>
+  <div class="status" id="status">读取中…</div>
+  <button class="btn" id="btn-rule" onclick="setMode('rule')">规则连接</button>
+  <button class="btn" id="btn-direct" onclick="setMode('direct')">直连</button>
+  <div class="err" id="err"></div>
+</div>
+<script>
+const NAMES = { rule: '规则连接', direct: '直连', global: '全局代理' };
+
+async function getMode() {
+  const r = await fetch('/configs');
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const d = await r.json();
+  return d.mode || 'rule';
+}
+
+function render(mode) {
+  document.getElementById('status').textContent = '当前模式：' + (NAMES[mode] || mode);
+  document.getElementById('btn-rule').classList.toggle('active', mode === 'rule');
+  document.getElementById('btn-direct').classList.toggle('active', mode === 'direct');
+}
+
+async function setMode(mode) {
+  const err = document.getElementById('err');
+  err.textContent = '';
+  try {
+    const r = await fetch('/configs', { method: 'PATCH', body: JSON.stringify({ mode }) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    render(await getMode());
+  } catch (e) {
+    err.textContent = '切换失败：' + e.message;
+  }
+}
+
+(async () => {
+  try {
+    render(await getMode());
+  } catch (e) {
+    document.getElementById('err').textContent = '无法连接 mihomo API（服务是否在运行？）';
+  }
+})();
+</script>
+</body>
+</html>

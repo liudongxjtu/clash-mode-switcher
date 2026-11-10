@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# clash-mode — 一键切换 mihomo 代理模式
+# 用法:
+#   clash-mode            # 显示当前模式
+#   clash-mode direct     # 切直连
+#   clash-mode rule       # 切规则代理
+#   clash-mode toggle     # 直连 <-> 规则 一键互切
+# 原理: PATCH mihomo Clash API (127.0.0.1:9090) 的 /configs mode 字段
+
+API="http://127.0.0.1:9090"
+
+get_mode() {
+    curl -s -m 5 "$API/configs" | grep -o '"mode":"[^"]*"' | head -1 | cut -d'"' -f4
+}
+
+current=$(get_mode)
+[ -n "$current" ] || { echo "无法连接 mihomo API（服务没在跑？）"; exit 1; }
+
+case "${1:-status}" in
+    direct|rule)
+        target=$1
+        ;;
+    toggle)
+        [ "$current" = "rule" ] && target="direct" || target="rule"
+        ;;
+    status)
+        echo "当前模式: $current"
+        exit 0
+        ;;
+    *)
+        echo "用法: clash-mode [direct|rule|toggle|status]"
+        exit 1
+        ;;
+esac
+
+# 注意: mihomo PATCH 成功返回 204 空 body，必须看 HTTP 状态码
+code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X PATCH "$API/configs" -d "{\"mode\":\"$target\"}")
+[ "$code" = "204" ] || [ "$code" = "200" ] || { echo "切换请求失败 (HTTP $code)"; exit 1; }
+
+after=$(get_mode)
+if [ "$after" = "$target" ]; then
+    echo "已切换: $current -> $after"
+else
+    echo "切换失败: 当前仍为 $after"
+    exit 1
+fi
