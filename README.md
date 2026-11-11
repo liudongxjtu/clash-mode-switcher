@@ -2,14 +2,9 @@
 
 在 mihomo（Clash Meta）代理的「规则连接 / 直连」模式间一键切换的两种方式：**Web 页面**和 **CLI 脚本**。两种方式共用一个 API（`PATCH /configs` 的 `mode` 字段），互不干扰。
 
-- 设计文档：`docs/design.md`
-- 实现计划：`docs/plan.md`
-
-![UI 效果](docs/image.png)
-
 ## 方式一：Web 页面
-
 mihomo 自带 external-ui 机制，一个 `index.html` 即可，零依赖、零额外进程。
+![UI 效果](docs/image.png)
 
 ### 部署
 
@@ -50,7 +45,27 @@ clash-mode             # 查看当前模式
 clash-mode direct      # 切直连
 clash-mode rule        # 切规则代理
 clash-mode toggle      # 一键互切
+clash-mode nodes       # 节点列表（最近延迟 + 当前出口标记）
+clash-mode test        # 一键测速（并发全部节点，超时标红）
+clash-mode use c22s3   # 固定出口（接受缩写或完整节点名）
+clash-mode auto        # 恢复自动选择
 ```
+
+功能与 Web 页面一致：`use`/`auto` 即页面里的点节点行/恢复自动，`test` 即页面的一键测速。
+
+## 测速原理
+
+页面与脚本的「测速」实际是**延迟测量**（毫秒级往返耗时），不是带宽测试；测量发生在 **mihomo 服务端**，前端/脚本只负责发起与展示：
+
+1. 客户端调 mihomo API：`GET /proxies/{节点名}/delay?url=...&timeout=8000`
+2. mihomo 以**指定节点**为出站建立代理隧道，通过隧道访问测试 URL
+3. 测试 URL 固定为 Google 的 `http://www.gstatic.com/generate_204`——返回 HTTP 204 空 body，负载极小且基础设施稳定，因此测得的是链路延迟而非下载速度
+4. mihomo 返回 `{"delay": <毫秒>}`；失败/超时返回 `{"message":"Timeout"}`
+5. 客户端并发发起全部节点的测试（页面用 `Promise.allSettled`，脚本用后台 `&` + `wait`），单节点 8 秒上限，逐行更新，失败标红
+
+`自动选择快速节点` 分组内部也用同一套 URLTest 逻辑周期测速选优（profile 里 `interval: 300`，每 5 分钟一轮），页面/脚本的一键测速相当于手动触发一次同样的测量并可视化结果。
+
+**注意**：延迟低 ≠ 带宽大（机场节点常见「测速漂亮、跑流量拉胯」）。真正测吞吐需要下载大文件计时，不在本项目范围内。
 
 ## 适用版本
 

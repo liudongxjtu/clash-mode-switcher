@@ -1,24 +1,169 @@
 #!/usr/bin/env bash
-# clash-mode — 一键切换 mihomo 代理模式
+# clash-mode — mihomo 代理控制：模式切换 + 出口节点管理
 # 用法:
-#   clash-mode            # 显示当前模式
-#   clash-mode direct     # 切直连
-#   clash-mode rule       # 切规则代理
-#   clash-mode toggle     # 直连 <-> 规则 一键互切
-# 原理: PATCH mihomo Clash API (127.0.0.1:9090) 的 /configs mode 字段
+#   clash-mode                    # 显示当前模式
+#   clash-mode direct|rule        # 切直连 / 规则代理
+#   clash-mode toggle             # 直连 <-> 规则 一键互切
+#   clash-mode nodes              # 节点列表（缩写 + 最近延迟 + 当前出口标记）
+#   clash-mode test               # 一键测速（并发全部节点，超时标红）
+#   clash-mode use <节点>         # 固定出口（接受 c22s3 缩写或完整节点名）
+#   clash-mode auto               # 恢复自动选择
+# 原理: 全部走 mihomo Clash API (127.0.0.1:9090)，与 Web 页面同一套契约:
+#   - 模式:  PATCH /configs {"mode":...}
+#   - 节点:  GET /proxies 解析；GET /proxies/{name}/delay 测速
+#   - 出口:  PUT /proxies/PROXY {"name":...}
+# 注意: mihomo PATCH/PUT 成功返回 204 空 body，判断只看 HTTP 状态码
 
 API="http://127.0.0.1:9090"
+AUTO_GROUP="自动选择快速节点"
+PROXY_GROUP="PROXY"
+TEST_URL="http://www.gstatic.com/generate_204"
+TEST_TIMEOUT=8000
+
+# 非 TTY（管道/脚本）时自动降级为无颜色
+if [ -t 1 ]; then
+    C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_CYAN=$'\033[36m'; C_OFF=$'\033[0m'
+else
+    C_RED=; C_GREEN=; C_CYAN=; C_OFF=
+fi
+
+usage() {
+    echo "用法: clash-mode [direct|rule|toggle|nodes|test|use <节点>|auto|status]"
+    exit 1
+}
 
 get_mode() {
     curl -s -m 5 "$API/configs" | grep -o '"mode":"[^"]*"' | head -1 | cut -d'"' -f4
 }
 
+# 输出每行 "全名|缩写|最近延迟"（延迟无数据为 -1；失败历史为 0）
+get_nodes() {
+    curl -s -m 5 "$API/proxies" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)['proxies']
+GT=['Selector','URLTest','Fallback','LoadBalance']
+ST=['Direct','Reject','RejectDrop','Compatible','Pass','PassRule']
+for v in d.values():
+    t=v.get('type')
+    if t in GT+ST: continue
+    n=v['name']
+    p=n.split('@')
+    s=p[1].split('.')[0] if len(p)>1 else n
+    h=v.get('history') or []
+    delay=h[-1]['delay'] if h else -1
+    print(n+'|'+s+'|'+str(delay))
+"
+}
+
+get_proxy_now() {
+    curl -s -m 5 "$API/proxies" | python3 -c "
+import json,sys
+print(json.load(sys.stdin)['proxies']['$PROXY_GROUP']['now'])
+"
+}
+
+put_proxy() {
+    local code
+    code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X PUT "$API/proxies/$PROXY_GROUP" -d "{\"name\":\"$1\"}")
+    [ "$code" = "204" ] || [ "$code" = "200" ] || { echo "切换失败 (HTTP $code)"; return 1; }
+}
+
+quote_url() {
+    python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$1"
+}
+
+do_nodes() {
+    local now list short delay mark
+    now=$(get_proxy_now)
+    [ -n "$now" ] || { echo "无法连接 mihomo API（服务没在跑？）"; exit 1; }
+    if [ "$now" = "$AUTO_GROUP" ]; then
+        echo "当前出口: ${C_GREEN}自动选择${C_OFF}（url-test 挑最快）"
+    else
+        short=$(get_nodes | awk -F'|' -v n="$now" '$1==n{print $2}')
+        echo "当前出口: ${C_CYAN}已固定: ${short:-$now}${C_OFF}"
+    fi
+    echo '---'
+    while IFS='|' read -r name short delay; do
+        mark=''
+        [ "$now" = "$name" ] && mark="${C_CYAN}<- 当前${C_OFF}"
+        if [ "$delay" -ge 0 ]; then
+            [ "$delay" = "0" ] && d="${C_RED}超时${C_OFF}" || d="${delay} ms"
+        else
+            d='-'
+        fi
+        printf '  %-8s %-12s %s\n' "$short" "$d" "$mark"
+    done < <(get_nodes)
+}
+
+do_test() {
+    local tmp name short delay d now mark
+    now=$(get_proxy_now)
+    [ -n "$now" ] || { echo "无法连接 mihomo API（服务没在跑？）"; exit 1; }
+    echo "一键测速中（并发全部节点，单节点 ${TEST_TIMEOUT}ms 超时）..."
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    while IFS='|' read -r name short delay; do
+        (
+            r=$(curl -s -m 12 --get "$API/proxies/$(quote_url "$name")/delay" \
+                --data-urlencode "url=$TEST_URL" --data-urlencode "timeout=$TEST_TIMEOUT")
+            d=$(echo "$r" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin).get('delay')
+    print(d if isinstance(d,int) else 'ERR')
+except Exception:
+    print('ERR')")
+            echo "$d" > "$tmp/$short"
+        ) &
+    done < <(get_nodes)
+    wait
+    while IFS='|' read -r name short delay; do
+        d=$(cat "$tmp/$short")
+        mark=''
+        [ "$now" = "$name" ] && mark="${C_CYAN}<- 当前${C_OFF}"
+        if [ "$d" = "ERR" ]; then
+            printf '  %-8s %s%-12s%s %s\n' "$short" "$C_RED" "超时/错误" "$C_OFF" "$mark"
+        else
+            printf '  %-8s %-12s %s\n' "$short" "${d} ms" "$mark"
+        fi
+    done < <(get_nodes)
+}
+
+do_use() {
+    local target match n
+    target="$1"
+    [ -n "$target" ] || { echo "用法: clash-mode use <节点缩写|完整节点名>"; exit 1; }
+    # 先精确匹配缩写或全名，再前缀匹配
+    match=$(get_nodes | awk -F'|' -v t="$target" '$2==t || $1==t {print $1}')
+    [ -z "$match" ] && match=$(get_nodes | awk -F'|' -v t="$target" 'index($2,t)==1 || index($1,t)==1 {print $1}')
+    n=$(echo "$match" | grep -c .)
+    [ "$n" = "0" ] && { echo "未找到节点: $target（先 clash-mode nodes 看列表）"; exit 1; }
+    [ "$n" != "1" ] && { echo "匹配到多个节点: $match"; exit 1; }
+    put_proxy "$match" || exit 1
+    echo "已固定出口: ${C_CYAN}$(echo "$match" | awk -F'@' '{print $2}' | awk -F'.' '{print $1}')${C_OFF}（clash-mode auto 恢复自动选择）"
+}
+
+do_auto() {
+    put_proxy "$AUTO_GROUP" || exit 1
+    echo "已恢复: ${C_GREEN}自动选择${C_OFF}（url-test 挑最快）"
+}
+
+cmd="${1:-status}"
+
+# nodes/test/use/auto 不依赖模式读取，先行分派
+case "$cmd" in
+    nodes) do_nodes; exit 0 ;;
+    test)  do_test;  exit 0 ;;
+    use)   do_use "$2"; exit 0 ;;
+    auto)  do_auto;  exit 0 ;;
+esac
+
 current=$(get_mode)
 [ -n "$current" ] || { echo "无法连接 mihomo API（服务没在跑？）"; exit 1; }
 
-case "${1:-status}" in
+case "$cmd" in
     direct|rule)
-        target=$1
+        target=$cmd
         ;;
     toggle)
         [ "$current" = "rule" ] && target="direct" || target="rule"
@@ -28,12 +173,10 @@ case "${1:-status}" in
         exit 0
         ;;
     *)
-        echo "用法: clash-mode [direct|rule|toggle|status]"
-        exit 1
+        usage
         ;;
 esac
 
-# 注意: mihomo PATCH 成功返回 204 空 body，必须看 HTTP 状态码
 code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X PATCH "$API/configs" -d "{\"mode\":\"$target\"}")
 [ "$code" = "204" ] || [ "$code" = "200" ] || { echo "切换请求失败 (HTTP $code)"; exit 1; }
 
