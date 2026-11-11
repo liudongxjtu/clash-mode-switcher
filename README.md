@@ -5,6 +5,8 @@
 - 设计文档：`docs/design.md`
 - 实现计划：`docs/plan.md`
 
+![UI 效果](docs/image.png)
+
 ## 方式一：Web 页面
 
 mihomo 自带 external-ui 机制，一个 `index.html` 即可，零依赖、零额外进程。
